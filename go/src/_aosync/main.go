@@ -25,7 +25,7 @@ func main() {
 		}
 	}
 	if !bFound {
-		log.Fatal("you should specify two target existed folders! like: amkasync -folders='/path/to/first/folder,/path/to/second/folder'")
+		log.Fatal("you should specify two target existed folders! like: aosync -folders='/path/to/first/folder,/path/to/second/folder'")
 	}
 	var err error
 	bFound = false
