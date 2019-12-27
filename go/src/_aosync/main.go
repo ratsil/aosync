@@ -16,6 +16,8 @@ var (
 
 func main() {
 	pFolders := flag.String("folders", "", "")
+	pPrivateKey := flag.String("private", "", "")
+	pPublicKey := flag.String("public", "", "")
 	flag.Parse()
 	bFound := false
 	if nil != pFolders {
@@ -27,12 +29,52 @@ func main() {
 	if !bFound {
 		log.Fatal("you should specify two target existed folders! like: aosync -folders='/path/to/first/folder,/path/to/second/folder'")
 	}
+	if nil != pPrivateKey && 0 < len(*pPrivateKey) {
+		a, err := ioutil.ReadFile(*pPrivateKey)
+		if nil != err {
+			log.Fatal("cannot find private key file:" + *pPrivateKey)
+		}
+		if err = PrivateKey(a); nil != err {
+			log.Fatal(err)
+		}
+	}
+	if nil != pPublicKey && 0 < len(*pPublicKey) {
+		a, err := ioutil.ReadFile(*pPublicKey)
+		if nil != err {
+			log.Fatal("cannot find public key file:" + *pPublicKey)
+		}
+		if err = PublicKey(a); nil != err {
+			log.Fatal(err)
+		}
+	}
 	var err error
 	bFound = false
 	sTarget := _aFolders[1]
 	for _, sSource := range _aFolders {
 		if !exists(sSource) {
 			log.Fatal("folder '" + sSource + "' does not exists!")
+		}
+		if nil != _pPublicKey && exists(sSource + "/.encrypt") {
+			if !exists(sSource + "/.encrypt/.done") {
+				log.Fatal("folder '" + sSource + "/.encrypt/.done' does not exists!")
+			}
+			bFound = true
+			b := true
+			err = cpd(sSource+"/.encrypt", sSource, sSource+"/.encrypt/.done", []string{".done"}, &b)
+			if nil != err {
+				log.Println(err)
+			}
+		}
+		if nil != _pPrivateKey && exists(sSource + "/.decrypt") {
+			if !exists(sSource + "/.decrypt/.done") {
+				log.Fatal("folder '" + sSource + "/.decrypt/.done' does not exists!")
+			}
+			bFound = true
+			b := false
+			err = cpd(sSource+"/.decrypt", sSource, sSource+"/.decrypt/.done", []string{".done"}, &b)
+			if nil != err {
+				log.Println(err)
+			}
 		}
 		if exists(sSource + "/.copy") {
 			if !exists(sSource + "/.copy/.done") {
@@ -57,9 +99,9 @@ func main() {
 	}
 }
 func cp(sSource, sTarget string) error {
-	return cpd(sSource+"/.copy", sTarget, sSource+"/.copy/.done", []string{".done"})
+	return cpd(sSource+"/.copy", sTarget, sSource+"/.copy/.done", []string{".done"}, nil)
 }
-func cpd(sSource, sTarget, sDone string, aExcludes []string) (err error) {
+func cpd(sSource, sTarget, sDone string, aExcludes []string, pEncrypt *bool) (err error) {
 	aEntries, err := ioutil.ReadDir(sSource)
 	if nil != err {
 		return
@@ -92,7 +134,7 @@ func cpd(sSource, sTarget, sDone string, aExcludes []string) (err error) {
 			if err = os.MkdirAll(sDoneEntry, 0777); nil != err {
 				return
 			}
-			if err = cpd(sSourceEntry, sTargetEntry, sDoneEntry, nil); nil != err {
+			if err = cpd(sSourceEntry, sTargetEntry, sDoneEntry, nil, pEncrypt); nil != err {
 				return
 			}
 			if err = os.Remove(sSourceEntry); nil != err {
@@ -101,7 +143,7 @@ func cpd(sSource, sTarget, sDone string, aExcludes []string) (err error) {
 		case os.ModeSymlink:
 			log.Println("symlink ignored:" + sSourceEntry)
 		default:
-			if err = cpf(sSourceEntry, sTargetEntry); nil != err {
+			if err = cpf(sSourceEntry, sTargetEntry, pEncrypt); nil != err {
 				return
 			}
 			if err = os.Rename(sSourceEntry, sDoneEntry); nil != err {
@@ -111,7 +153,7 @@ func cpd(sSource, sTarget, sDone string, aExcludes []string) (err error) {
 	}
 	return nil
 }
-func cpf(sSource, sTarget string) error {
+func cpf(sSource, sTarget string, pEncrypt *bool) error {
 	if exists(sTarget) {
 		log.Println("'" + sTarget + "' exists")
 		return nil
@@ -126,7 +168,29 @@ func cpf(sSource, sTarget string) error {
 	if nil != err {
 		return err
 	}
-	_, err = io.Copy(pTarget, pSource)
+	if nil != pEncrypt {
+		a := make([]byte, 1024)
+		for {
+			n, err := pSource.Read(a)
+			if nil != err {
+				if io.EOF != err {
+					return err
+				}
+				err = nil
+				break
+			}
+			if *pEncrypt {
+				a, err = Encrypt(a[:n])
+			} else {
+				a, err = Decrypt(a[:n])
+			}
+			if _, err = pTarget.Write(a); nil != err {
+				return err
+			}
+		}
+	} else {
+		_, err = io.Copy(pTarget, pSource)
+	}
 	return err
 }
 
