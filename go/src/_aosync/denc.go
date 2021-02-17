@@ -1,16 +1,18 @@
 package main
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/sha512"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/pem"
 )
 
 var (
 	_pPrivateKey *rsa.PrivateKey
-	_pPublicKey *rsa.PublicKey
+	_pPublicKey  *rsa.PublicKey
 )
 
 //PrivateKey .
@@ -53,12 +55,44 @@ func PublicKey(pub []byte) (err error) {
 	return
 }
 
-//Encrypt .
-func Encrypt(a []byte) ([]byte, error) {
-	return rsa.EncryptOAEP(sha512.New(), rand.Reader, _pPublicKey, a, nil)
+//EncryptByKey .
+func EncryptByKey(a []byte) ([]byte, error) {
+	return rsa.EncryptOAEP(sha256.New(), rand.Reader, _pPublicKey, a, nil)
 }
 
-//Decrypt .
-func Decrypt(a []byte) ([]byte, error) {
-	return rsa.DecryptOAEP(sha512.New(), rand.Reader, _pPrivateKey, a, nil)
-} 
+//DecryptByKey .
+func DecryptByKey(a []byte) ([]byte, error) {
+	return rsa.DecryptOAEP(sha256.New(), rand.Reader, _pPrivateKey, a, nil)
+}
+
+//Cipher .
+type Cipher struct {
+	Buffer  []byte
+	iBlock  cipher.Block
+	IV      []byte
+	iStream cipher.Stream
+}
+
+//NewCipher .
+func NewCipher(aKey, aIV []byte, nBufferSize int) (pRetVal *Cipher, err error) {
+	pRetVal = new(Cipher)
+	if pRetVal.iBlock, err = aes.NewCipher(aKey); nil != err {
+		return
+	}
+	pRetVal.IV = aIV
+	if nil == aIV {
+		pRetVal.IV = make([]byte, pRetVal.iBlock.BlockSize())
+		if _, err = rand.Read(pRetVal.IV); nil != err {
+			return
+		}
+	}
+	pRetVal.iStream = cipher.NewCTR(pRetVal.iBlock, pRetVal.IV)
+	pRetVal.Buffer = make([]byte, int(nBufferSize/16)*16)
+	return
+}
+
+//Do .
+func (th *Cipher) Do(n int) []byte {
+	th.iStream.XORKeyStream(th.Buffer, th.Buffer[:n])
+	return th.Buffer[:n]
+}
