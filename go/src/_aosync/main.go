@@ -4,23 +4,37 @@ import (
 	"crypto/rand"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime/debug"
 	"strconv"
 	s "strings"
 	"sync"
+	"time"
 	t "time"
+
+	"github.com/ratsil/go-helpers/log"
 )
 
 var (
-	_sLocal      string
-	_sRemote     string
-	_nBufferSize int
+	_sLocalInstance  string
+	_sLocalFolder    string
+	_sRemoteInstance string
+	_sRemoteFolder   string
+	_nBufferSize     int
+	_aBuffers        [][]byte
+	_cBuffersQueue   chan *Buffer
 )
+
+//Buffer .
+type Buffer struct {
+	Index  int
+	Length int
+}
 
 //Denc .
 type Denc struct {
@@ -30,23 +44,74 @@ type Denc struct {
 
 func main() {
 	var err error
-	pLocal := flag.String("local", "", "path to the local folder. flag is mandatory")
-	pRemote := flag.String("remote", "", "path to the remote folder. flag is mandatory")
+	pLocal := flag.String("local", "", "path to the local folder along with local instance name separated by @. latter will be used to determine target control folders. flag is mandatory")
+	pRemote := flag.String("remote", "", "path to the remote folder along with target instance name separated by @. latter will be used to determine target control folders. flag is mandatory")
 	pPublicKey := flag.String("public", "", "path to the public key. flag is optional")
 	pPrivateKey := flag.String("private", "", "path to the private key. flag is optional but requires the public flag")
-	pBuffer := flag.String("buffer", "10240", "buffer size in KB. default is 10240KB (i.e. 10MB)")
+	pBuffer := flag.String("buffer", "102400@10", "buffer size in KB and qty of subbuffers. default is 102400KB (i.e. 100MB) in total and 10 subbuffers (i.e. 10 buffers of 10MB each")
+	pLog := flag.String("log", "aosync@.", "log prefix and path to the log folder separated by @. default is a aosync@.")
 	flag.Parse()
-	sUsage := "usage: aosync -local=/path/to/local/folder -remote=/path/to/remote/folder [-public=/path/to/public/key/file [-private=/path/to/private/key/file]] [-buffer=10240]"
-	if nil == pLocal || nil == pRemote {
-		log.Fatal("you should specify local and remote folders! " + sUsage)
+	sUsage := "usage: aosync -local=/path/to/local/folder@some_local_instance_name -remote=/path/to/remote/folder@some_remote_instance_name [-public=/path/to/public/key/file [-private=/path/to/private/key/file]] [-buffer=102400[@10]] [-log=prefix@/path/to/log/folder]"
+
+	a := s.Split(*pLog, "@")
+	if 2 == len(a) {
+		log.Default(a[1], a[0])
+	} else {
+		log.Default(".", "aosync")
 	}
-	_sLocal = *pLocal
-	_sRemote = *pRemote
+	log.Notice("********* START:")
+
+	sAOSync, err := os.Executable()
+	if err == nil {
+		log.Notice(sAOSync)
+	} else {
+		log.Error(err)
+	}
+
+	err = errors.New("you should specify local and remote folders along with instance names! " + sUsage)
+	if nil != pLocal && nil != pRemote {
+		a := s.Split(*pLocal, "@")
+		if 2 == len(a) && exists(a[0]) && 0 < len(a[1]) {
+			_sLocalFolder, _sLocalInstance = a[0], a[1]
+			a = s.Split(*pRemote, "@")
+			if 2 == len(a) && exists(a[0]) && 0 < len(a[1]) {
+				_sRemoteFolder, _sRemoteInstance = a[0], a[1]
+				err = nil
+			}
+		}
+
+	}
+	log.Fatal(err)
+	sControl := path.Join(_sLocalFolder, ".aosync")
+
+	if 0 < len(sAOSync) {
+		sUpdate := path.Join(sControl, ".update", filepath.Base(sAOSync))
+		if exists(sUpdate) {
+			sBackup := sAOSync + ".bkp"
+			if exists(sBackup) {
+				log.Notice("backup exists:" + sBackup + ". removing")
+				log.Error(os.Remove(sBackup))
+			}
+			log.Notice("create backup:" + sBackup)
+			errBackup := log.Error(os.Rename(sAOSync, sBackup))
+			log.Notice("updating")
+			if nil != log.Error(os.Rename(sUpdate, sAOSync)) {
+				log.Notice("update failed")
+				if nil == errBackup {
+					log.Notice("trying to restore from backup")
+					log.Error(os.Rename(sBackup, sAOSync))
+				}
+			} else {
+				log.Notice("updated. exiting")
+				return
+			}
+		}
+	}
 
 	if nil != pPublicKey && 0 < len(*pPublicKey) {
 		a, err := ioutil.ReadFile(*pPublicKey)
 		if nil != err {
-			log.Fatal("cannot find public key file:" + *pPublicKey)
+			log.Fatal(errors.New("cannot find public key file:" + *pPublicKey))
 		}
 		if err = PublicKey(a); nil != err {
 			log.Fatal(err)
@@ -54,36 +119,66 @@ func main() {
 	}
 	if nil != pPrivateKey && 0 < len(*pPrivateKey) {
 		if nil == _pPublicKey {
-			log.Fatal("missing public key! " + sUsage)
+			log.Fatal(errors.New("missing public key! " + sUsage))
 		}
 		a, err := ioutil.ReadFile(*pPrivateKey)
 		if nil != err {
-			log.Fatal("cannot find private key file:" + *pPrivateKey)
+			log.Fatal(errors.New("cannot find private key file:" + *pPrivateKey))
 		}
 		if err = PrivateKey(a); nil != err {
 			log.Fatal(err)
 		}
 	}
-	if _nBufferSize, err = strconv.Atoi(*pBuffer); nil != err {
-		log.Fatal("buffer should be an integer value! " + sUsage)
+
+	sSource := path.Join(sControl, ".stop")
+	if exists(sSource) {
+		log.Fatal(errors.New("found " + sSource + ". please remove to continue. now exiting"))
+	}
+	sSource = path.Join(sControl, ".restart")
+	if exists(sSource) {
+		if err = os.Remove(sSource); nil != err {
+			log.Fatal(err)
+		}
+		log.Notice("found " + sSource + " on start. removed")
 	}
 
+	a = s.Split(*pBuffer, "@")
+	if 1 == len(a) || 1 > len(a[1]) {
+		a = append(a, "")
+		a[1] = "10"
+	}
+
+	if _nBufferSize, err = strconv.Atoi(a[0]); nil != err {
+		log.Fatal(errors.New("buffer size should be an integer value! " + sUsage))
+	}
+	nBuffers := 10
+	if nBuffers, err = strconv.Atoi(a[1]); nil != err {
+		log.Fatal(errors.New("subbuffers qty should be an integer value! " + sUsage))
+	}
+	_aBuffers = make([][]byte, nBuffers)
+	_nBufferSize *= 1024 / nBuffers
+	_cBuffersQueue = make(chan *Buffer, nBuffers)
+	for n := 0; nBuffers > n; n++ {
+		_aBuffers[n] = make([]byte, _nBufferSize)
+		_cBuffersQueue <- &Buffer{n, _nBufferSize}
+	}
+	debug.SetGCPercent(5)
 	bFound := false
 	// 1. copy from nas/tape with decrypt
 	// 2. copy/move to nas/tape with encrypt
 	// 3. move from nas to tape
 	// 4. copy between nas and tape
 	// 5. encrypt nas/tape
-	sSource := _sLocal
-	sTarget := _sRemote
+	sSource = path.Join(sControl, _sRemoteInstance)
+	sTarget := _sRemoteFolder
 	var wg sync.WaitGroup
 	for n := 0; 2 > n; n++ {
 		if !exists(sSource) {
-			log.Fatal("folder '" + sSource + "' does not exists!")
+			log.Fatal(errors.New("folder '" + sSource + "' does not exists!"))
 		}
-		if exists(sSource + "/.copy") {
-			if !exists(sSource + "/.copy/.done") {
-				log.Fatal("folder '" + sSource + "/.copy/.done' does not exists!")
+		if exists(path.Join(sSource, ".copy")) {
+			if !exists(path.Join(sSource, ".copy", ".done")) {
+				log.Fatal(errors.New("folder '" + path.Join(sSource, ".copy", ".done") + "' does not exists!"))
 			}
 			bFound = true
 			wg.Add(1)
@@ -93,8 +188,8 @@ func main() {
 				if nil != _pPrivateKey {
 					pDenc = &Denc{Decrypt: b}
 				}
-				if err := cp(sSource, sTarget, pDenc); nil != err {
-					log.Println(err)
+				if err := cpd(path.Join(sSource, ".copy"), sTarget, path.Join(sSource, ".copy", ".done"), []string{".done"}, pDenc); nil != err {
+					log.Error(err)
 				}
 			}(sSource, sTarget, 0 < n)
 		}
@@ -107,48 +202,72 @@ func main() {
 				if nil != _pPrivateKey {
 					pDenc = &Denc{Decrypt: b}
 				}
-				if err := mv(sSource, sTarget, pDenc); nil != err {
-					log.Println(err)
+				if err := cpd(path.Join(sSource, ".move"), sTarget, "", []string{""}, pDenc); nil != err {
+					log.Error(err)
 				}
 			}(sSource, sTarget, 0 < n)
 		}
-		if nil != _pPublicKey && exists(sSource+"/.encrypt") {
-			if !exists(sSource + "/.encrypt/.done") {
-				log.Fatal("folder '" + sSource + "/.encrypt/.done' does not exists!")
-			}
-			if !exists(sSource + "/.encrypt/.encrypted") {
-				log.Fatal("folder '" + sSource + "/.encrypt/.encrypted' does not exists!")
-			}
-			bFound = true
-			wg.Add(1)
-			go func(sSource string) {
-				defer wg.Done()
-				if err := cpd(sSource+"/.encrypt", sSource+"/.encrypt/.encrypted", sSource+"/.encrypt/.done", []string{".done", ".encrypted"}, new(Denc)); nil != err {
-					log.Println(err)
+		if nil != _pPublicKey && nil == _pPrivateKey {
+			sEncrypt := path.Join(sSource, "..", ".encrypt")
+			if exists(sEncrypt) {
+				sEncrypted := path.Join(sEncrypt, ".encrypted")
+				if !exists(sEncrypted) {
+					log.Fatal(errors.New("folder '" + sEncrypted + "' does not exists!"))
 				}
-			}(sSource)
+				sDone := path.Join(sEncrypt, ".done")
+				if !exists(sDone) {
+					sDone = ""
+				}
+				bFound = true
+				wg.Add(1)
+				go func(sEncrypt, sEncrypted, sDone string) {
+					defer wg.Done()
+					if 1 > len(sDone) {
+						if err := cpd(sEncrypt, sEncrypted, "", []string{".encrypted"}, new(Denc)); nil != err {
+							log.Error(err)
+						}
+					} else {
+						if err := cpd(sEncrypt, sEncrypted, sDone, []string{".done", ".encrypted"}, new(Denc)); nil != err {
+							log.Error(err)
+						}
+					}
+				}(sEncrypt, sEncrypted, sDone)
+			}
 		}
-		sSource = sTarget
-		sTarget = _sLocal
+		sSource = path.Join(_sRemoteFolder, ".aosync", _sLocalInstance)
+		sTarget = _sLocalFolder
 	}
 	if !bFound {
-		log.Fatal("there are no any .copy or .move subfolders. nothing to do. bye!")
+		log.Fatal(errors.New("there are no any .copy or .move subfolders. nothing to do. bye"))
 	}
 	wg.Wait()
+	log.Notice("********* STOP")
 }
-func cp(sSource, sTarget string, pDenc *Denc) error {
-	return cpd(sSource+"/.copy", sTarget, sSource+"/.copy/.done", []string{".done"}, pDenc)
-}
+
 func cpd(sSource, sTarget, sDone string, aExcludes []string, pDenc *Denc) (err error) {
 	aEntries, err := ioutil.ReadDir(sSource)
 	if nil != err {
-		log.Print(sSource + ":" + sTarget)
+		log.Notice(sSource + ":" + sTarget)
 		debug.PrintStack()
 		return
 	}
+	bCopy := 0 < len(sDone)
 	var oFileInfo os.FileInfo
 	for _, oEntry := range aEntries {
 		sSourceEntry := oEntry.Name()
+
+		sControl := path.Join(_sLocalFolder, ".aosync", ".restart")
+		err = errors.New("found " + sControl + " before " + sSourceEntry)
+		if !exists(sControl) {
+			sControl = path.Join(_sLocalFolder, ".aosync", ".stop")
+			if exists(sControl) {
+				err = errors.New("found " + sControl + " before " + sSourceEntry)
+			} else {
+				err = nil
+			}
+		}
+		log.Fatal(err)
+
 		for _, sExclude := range aExcludes {
 			if sExclude == sSourceEntry {
 				sSourceEntry = "."
@@ -159,9 +278,11 @@ func cpd(sSource, sTarget, sDone string, aExcludes []string, pDenc *Denc) (err e
 			continue
 		}
 		sTargetEntry := filepath.Join(sTarget, sSourceEntry)
-		sDoneEntry := filepath.Join(sDone, sSourceEntry)
+		var sDoneEntry string
+		if bCopy {
+			sDoneEntry = filepath.Join(sDone, sSourceEntry)
+		}
 		sSourceEntry = filepath.Join(sSource, sSourceEntry)
-
 		if oFileInfo, err = os.Stat(sSourceEntry); nil != err {
 			return
 		}
@@ -171,17 +292,17 @@ func cpd(sSource, sTarget, sDone string, aExcludes []string, pDenc *Denc) (err e
 			if err = os.MkdirAll(sTargetEntry, 0777); nil != err {
 				return
 			}
-			if err = os.MkdirAll(sDoneEntry, 0777); nil != err {
-				return
+			if bCopy {
+				if err = os.MkdirAll(sDoneEntry, 0777); nil != err {
+					return
+				}
 			}
 			if err = cpd(sSourceEntry, sTargetEntry, sDoneEntry, nil, pDenc); nil != err {
 				return
 			}
-			if err = os.Remove(sSourceEntry); nil != err {
-				return
-			}
+			log.Error(os.Remove(sSourceEntry))
 		case os.ModeSymlink:
-			log.Println("symlink ignored:" + sSourceEntry)
+			log.Notice("symlink ignored:" + sSourceEntry)
 		default:
 			if nil != pDenc {
 				if !pDenc.Decrypt {
@@ -190,124 +311,129 @@ func cpd(sSource, sTarget, sDone string, aExcludes []string, pDenc *Denc) (err e
 					sTargetEntry = sTargetEntry[:len(sTargetEntry)-5]
 				}
 			}
-			if err = cpf(sSourceEntry, sTargetEntry, pDenc); nil != err {
-				return
-			}
-			if err = os.Rename(sSourceEntry, sDoneEntry); nil != err {
-				return
-			}
-		}
-	}
-	return nil
-}
-func cpf(sSource, sTarget string, pDenc *Denc) error {
-	if exists(sTarget) {
-		log.Println("'" + sTarget + "' exists")
-		return nil
-	}
-	pSource, err := os.Open(sSource)
-	defer pSource.Close()
-	if nil != err {
-		return err
-	}
-	pTarget, err := os.Create(sTarget)
-	defer pTarget.Close()
-	if nil != err {
-		return err
-	}
-	log.Print("start copy: " + sSource)
-	if nil != pDenc && pDenc.Decrypt && !s.HasSuffix(s.ToLower(sSource), ".aose") {
-		return copy(pTarget, pSource, nil)
-	}
-	return copy(pTarget, pSource, pDenc)
-}
 
-func mv(sSource, sTarget string, pDenc *Denc) error {
-	return mvd(sSource+"/.move", sTarget, pDenc)
-}
-func mvd(sSource, sTarget string, pDenc *Denc) (err error) {
-	aEntries, err := ioutil.ReadDir(sSource)
-	if nil != err {
-		return
-	}
-	var oFileInfo os.FileInfo
-	for _, oEntry := range aEntries {
-		sSourceEntry := oEntry.Name()
-		if "." == sSourceEntry || ".." == sSourceEntry {
-			continue
-		}
-		sTargetEntry := filepath.Join(sTarget, sSourceEntry)
-		sSourceEntry = filepath.Join(sSource, sSourceEntry)
+			if !exists(sTargetEntry) {
+				var pSource, pTarget *os.File
+				if pSource, err = os.Open(sSourceEntry); nil != err {
+					return
+				}
+				defer pSource.Close()
 
-		if oFileInfo, err = os.Stat(sSourceEntry); nil != err {
-			return
-		}
+				if pTarget, err = os.Create(sTargetEntry); nil != err {
+					return
+				}
+				defer pTarget.Close()
 
-		switch oFileInfo.Mode() & os.ModeType {
-		case os.ModeDir:
-			if err = os.MkdirAll(sTargetEntry, 0777); nil != err {
-				return
+				log.Notice(" ***** start copy: " + sSourceEntry + " => " + sTargetEntry)
+				pDENC := pDenc
+				if nil != pDenc && pDenc.Decrypt && !s.HasSuffix(s.ToLower(sSourceEntry), ".aose") {
+					pDENC = nil
+				}
+				if err = copy(pTarget, pSource, pDENC); nil != err {
+					return
+				}
+				log.Error(pSource.Close())
+				if !bCopy {
+					if err = os.Remove(sSourceEntry); nil != err {
+						log.Error(err)
+					}
+				}
+			} else {
+				log.Notice("'" + sTargetEntry + "' exists")
 			}
-			if err = mvd(sSourceEntry, sTargetEntry, pDenc); nil != err {
-				return
-			}
-			if err = os.Remove(sSourceEntry); nil != err {
-				log.Print(err.Error())
-			}
-		case os.ModeSymlink:
-			log.Println("symlink ignored:" + sSourceEntry)
-		default:
-			if nil != pDenc {
-				if !pDenc.Decrypt {
-					sTargetEntry += ".aose"
-				} else if s.HasSuffix(s.ToLower(sTargetEntry), ".aose") {
-					sTargetEntry = sTargetEntry[:len(sTargetEntry)-5]
+			if bCopy {
+				if err = os.Rename(sSourceEntry, sDoneEntry); nil != err {
+					log.Error(err)
 				}
 			}
-			if err = mvf(sSourceEntry, sTargetEntry, pDenc); nil != err {
-				return
-			}
 		}
 	}
 	return nil
 }
-func mvf(sSource, sTarget string, pDenc *Denc) (err error) {
-	if exists(sTarget) {
-		log.Println("'" + sTarget + "' exists")
-		return
-	}
-	pSource, err := os.Open(sSource)
-	defer pSource.Close()
-	if nil != err {
-		return
-	}
-	pTarget, err := os.Create(sTarget)
-	defer pTarget.Close()
-	if nil != err {
-		return
-	}
 
-	log.Print("start move: " + sSource)
-	if err = copy(pTarget, pSource, pDenc); nil != err {
-		return
+//Speed .
+type Speed struct {
+	CurrentStart    t.Time
+	OverallStart    t.Time
+	CurrentDuration t.Duration
+	OverallDuration t.Duration
+	CurrentQty      int64
+	OverallQty      int64
+}
+
+//Start .
+func (th *Speed) Start() {
+	th.Restart()
+	th.OverallStart = th.CurrentStart
+	th.OverallDuration = th.CurrentDuration
+	th.OverallQty = th.CurrentQty
+}
+
+//Wake .
+func (th *Speed) Wake() {
+	th.CurrentStart = t.Now()
+}
+
+//Sleep .
+func (th *Speed) Sleep(nQty int64) {
+	d := t.Since(th.CurrentStart)
+	th.OverallDuration += d
+	th.OverallQty += nQty
+	th.CurrentDuration += d
+	th.CurrentQty += nQty
+	th.Wake()
+	return
+}
+
+//Restart .
+func (th *Speed) Restart() {
+	th.Wake()
+	th.CurrentDuration = 0
+	th.CurrentQty = 0
+}
+
+func (th *Speed) speed(n int64, d t.Duration) int64 {
+	nSpeed := int64(d / t.Second)
+	if 0 < nSpeed {
+		nSpeed = (((n * 8) / nSpeed) / 1024 / 1024)
 	}
-	if err = pSource.Close(); nil != err {
-		return
+	return nSpeed
+}
+
+//Average .
+func (th *Speed) Average() t.Duration {
+	if 2 > th.CurrentQty {
+		return th.CurrentDuration
 	}
-	return os.Remove(sSource)
+	return t.Duration(th.CurrentDuration.Nanoseconds()/th.CurrentQty) * t.Nanosecond
+}
+
+//String .
+func (th *Speed) String() string {
+	return fmt.Sprintf("current speed at ~%dMbit/s for an average %s while overall at ~%dMbit/s for a total %s", th.speed(th.CurrentQty, th.CurrentDuration), th.Average().String(), th.speed(th.OverallQty, th.OverallDuration), th.OverallDuration.String())
 }
 
 func copy(pTarget, pSource *os.File, pDenc *Denc) (err error) {
-	nBytes := int64(0)
-	tStart := t.Now()
+	oFI, err := pSource.Stat()
+	if nil != err {
+		return err
+	}
+	nSizeTotalWrite := oFI.Size()
+	errRead := error(nil)
+	dLog := 5 * t.Minute
+	dLog = 1 * t.Second
+	cWriteQueue := make(chan *Buffer, len(_aBuffers))
+
 	if nil != pDenc {
+		nSizeHeader := int64(4 + 256 + 16)
 		if !pDenc.Decrypt {
+			nSizeTotalWrite += nSizeHeader
 			aPassword := make([]byte, 32)
 			if _, err = rand.Read(aPassword); nil != err {
 				return err
 			}
 
-			pDenc.Cipher, err = NewCipher(aPassword, nil, _nBufferSize*1024)
+			pDenc.Cipher, err = NewCipher(aPassword, nil)
 			if nil != err {
 				return err
 			}
@@ -324,7 +450,8 @@ func copy(pTarget, pSource *os.File, pDenc *Denc) (err error) {
 				return err
 			}
 		} else {
-			aHeader := make([]byte, 4+256+16)
+			nSizeTotalWrite -= nSizeHeader
+			aHeader := make([]byte, nSizeHeader)
 			if _, err = pSource.Read(aHeader); nil != err {
 				return err
 			}
@@ -335,30 +462,144 @@ func copy(pTarget, pSource *os.File, pDenc *Denc) (err error) {
 			if nil != err {
 				return err
 			}
-			pDenc.Cipher, err = NewCipher(aPassword, aHeader[260:], _nBufferSize*1024)
+			pDenc.Cipher, err = NewCipher(aPassword, aHeader[260:])
+		}
+	}
+	go func() {
+		tLog := t.Now()
+		pSpeedRead := new(Speed)
+		pSpeedRead.Start()
+		pSpeedReadPop := new(Speed)
+		pSpeedReadPop.Start()
+		pSpeedReadPush := new(Speed)
+		pSpeedReadPush.Start()
+		pSpeedDenc := new(Speed)
+		if nil != pDenc {
+			pSpeedDenc.Start()
 		}
 		for {
-			n, err := pSource.Read(pDenc.Cipher.Buffer)
-			if 0 < n {
-				if _, err = pTarget.Write(pDenc.Cipher.Do(n)); nil != err {
-					return err
-				}
-				nBytes += int64(n)
+			var (
+				pBuffer *Buffer
+				c       chan *Buffer
+			)
+			pSpeedReadPop.Wake()
+			select {
+			case pBuffer = <-_cBuffersQueue:
+			case <-time.After(5 * time.Minute):
+				errRead = errors.New("timeout on get free buffer before read")
+				log.Error(errRead)
+				return
 			}
-			if io.EOF == err {
+			pSpeedReadPop.Sleep(1)
+			if 1 > pBuffer.Length {
+				continue
+			}
+
+			pSpeedRead.Wake()
+			n, err := pSource.Read(_aBuffers[pBuffer.Index])
+			pSpeedRead.Sleep(int64(n))
+			if 0 < n {
+				if dLog < t.Since(tLog) {
+					tLog = t.Now()
+					log.Printf("READ %s. Along with POP for %s; PUSH for %s", pSpeedRead.String(), pSpeedReadPop.Average().String(), pSpeedReadPush.Average().String())
+					if nil != pDenc {
+						log.Printf("DENC %s", pSpeedDenc.String())
+					}
+					pSpeedRead.Restart()
+					pSpeedReadPop.Restart()
+					pSpeedReadPush.Restart()
+					pSpeedDenc.Restart()
+				}
+				if nil != pDenc {
+					pSpeedDenc.Wake()
+					pDenc.Cipher.Do(_aBuffers[pBuffer.Index][:n])
+					pSpeedDenc.Sleep(int64(n))
+				}
+				pBuffer.Length = n
+				c = cWriteQueue
+			} else {
+				c = _cBuffersQueue
+			}
+			pSpeedReadPush.Wake()
+			select {
+			case c <- pBuffer:
+			case <-time.After(5 * time.Minute):
+				errRead = errors.New("timeout on queue full buffer or re-queue unused one after file read")
+				log.Error(errRead)
+				return
+			}
+			pSpeedReadPush.Sleep(1)
+			if nil != err {
+				if io.EOF == err {
+					err = nil
+				}
 				break
 			}
 		}
-	} else if nBytes, err = io.CopyBuffer(pTarget, pSource, make([]byte, _nBufferSize*1024)); nil != err {
-		return
+		log.Error(err)
+		close(cWriteQueue)
+	}()
+	var pBuffer *Buffer
+	tLog := t.Now()
+	nBytesUsed := 0
+	pSpeedWrite := new(Speed)
+	pSpeedWrite.Start()
+	pSpeedWritePop := new(Speed)
+	pSpeedWritePop.Start()
+	pSpeedWritePush := new(Speed)
+	pSpeedWritePush.Start()
+	for {
+		if nil != errRead {
+			return errRead
+		}
+		bContinue := false
+		n := 0
+		pSpeedWritePop.Wake()
+		select {
+		case pBuffer, bContinue = <-cWriteQueue:
+			if nil != pBuffer && 0 < pBuffer.Length {
+				pSpeedWritePop.Sleep(1)
+				pSpeedWrite.Wake()
+				n, err = pTarget.Write(_aBuffers[pBuffer.Index][:pBuffer.Length])
+				pSpeedWrite.Sleep(int64(n))
+				if nil != err {
+					return
+				}
+				if n != pBuffer.Length {
+					log.Fatal(errors.New("n != pBuffer.Length"))
+				}
+				nBytesUsed += n
+				if 1024*1024*1024 < nBytesUsed {
+					nBytesUsed = 0
+					go debug.FreeOSMemory()
+				}
+				if dLog < t.Since(tLog) {
+					tLog = t.Now()
+
+					log.Printf("WRITE (%d%%) %s. Along with POP for %s and PUSH for %s", int64(pSpeedWrite.OverallQty*100/nSizeTotalWrite), pSpeedWrite.String(), pSpeedWritePop.Average().String(), pSpeedWritePush.Average().String())
+					pSpeedWrite.Restart()
+					pSpeedWritePop.Restart()
+					pSpeedWritePush.Restart()
+				}
+				pBuffer.Length = _nBufferSize
+				select {
+				case _cBuffersQueue <- pBuffer:
+				case <-time.After(5 * time.Minute):
+					return errors.New("timeout on re-queue the buffer after file write")
+				}
+
+			}
+		case <-time.After(5 * time.Minute):
+			return errors.New("timeout on read full buffer before write")
+		default:
+			continue
+		}
+		if !bContinue {
+			break
+		}
 	}
-	dElapsed := t.Since(tStart)
-	nSpeed := int64(dElapsed / t.Second)
-	if 0 < nSpeed {
-		nSpeed = (((nBytes * 8) / nSpeed) / 1024 / 1024)
-	}
-	log.Printf("finished. elapsed:"+dElapsed.String()+"; ~%dMbit/s.", nSpeed)
-	return
+	log.Printf(" ***** copy finished with %s", pSpeedWrite.String())
+	return os.Chtimes(pTarget.Name(), oFI.ModTime(), oFI.ModTime())
 }
 
 func exists(sPath string) bool {

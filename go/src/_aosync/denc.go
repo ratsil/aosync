@@ -67,14 +67,13 @@ func DecryptByKey(a []byte) ([]byte, error) {
 
 //Cipher .
 type Cipher struct {
-	Buffer  []byte
 	iBlock  cipher.Block
 	IV      []byte
 	iStream cipher.Stream
 }
 
 //NewCipher .
-func NewCipher(aKey, aIV []byte, nBufferSize int) (pRetVal *Cipher, err error) {
+func NewCipher(aKey, aIV []byte) (pRetVal *Cipher, err error) {
 	pRetVal = new(Cipher)
 	if pRetVal.iBlock, err = aes.NewCipher(aKey); nil != err {
 		return
@@ -87,12 +86,10 @@ func NewCipher(aKey, aIV []byte, nBufferSize int) (pRetVal *Cipher, err error) {
 		}
 	}
 	pRetVal.iStream = cipher.NewCTR(pRetVal.iBlock, pRetVal.IV)
-	pRetVal.Buffer = make([]byte, int(nBufferSize/16)*16)
 	return
 }
 
 //Do .
-func (th *Cipher) Do(n int) []byte {
-	th.iStream.XORKeyStream(th.Buffer, th.Buffer[:n])
-	return th.Buffer[:n]
+func (th *Cipher) Do(a []byte) {
+	th.iStream.XORKeyStream(a, a)
 }
