@@ -28,6 +28,7 @@ var (
 	_nBufferSize     int
 	_aBuffers        [][]byte
 	_cBuffersQueue   chan *Buffer
+	_dLog            t.Duration
 )
 
 //Buffer .
@@ -49,16 +50,24 @@ func main() {
 	pPublicKey := flag.String("public", "", "path to the public key. flag is optional")
 	pPrivateKey := flag.String("private", "", "path to the private key. flag is optional but requires the public flag")
 	pBuffer := flag.String("buffer", "102400@10", "buffer size in KB and qty of subbuffers. default is 102400KB (i.e. 100MB) in total and 10 subbuffers (i.e. 10 buffers of 10MB each")
-	pLog := flag.String("log", "aosync@.", "log prefix and path to the log folder separated by @. default is a aosync@.")
+	pLog := flag.String("log", "./aosync@300", "log path with file prefix and period in seconds separated by @ default is a ./aosync@300")
 	flag.Parse()
-	sUsage := "usage: aosync -local=/path/to/local/folder@some_local_instance_name -remote=/path/to/remote/folder@some_remote_instance_name [-public=/path/to/public/key/file [-private=/path/to/private/key/file]] [-buffer=102400[@10]] [-log=prefix@/path/to/log/folder]"
+	sUsage := "usage: aosync -local=/path/to/local/folder@some_local_instance_name -remote=/path/to/remote/folder@some_remote_instance_name [-public=/path/to/public/key/file [-private=/path/to/private/key/file]] [-buffer=102400[@10]] [-log=[/path/to/log/folder/]prefix[@300]]"
 
+	nLogPeriod := 300
 	a := s.Split(*pLog, "@")
 	if 2 == len(a) {
-		log.Default(a[1], a[0])
-	} else {
-		log.Default(".", "aosync")
+		if nLogPeriod, err = strconv.Atoi(a[1]); nil != err {
+			panic("log period should be an integer value! " + sUsage)
+		}
 	}
+	sLogPath := "."
+	if sLogPath, err = filepath.Abs(filepath.Dir(a[0])); nil != err {
+		panic("wrong log path:" + err.Error())
+	}
+	log.Default(sLogPath, filepath.Base(a[0]))
+	_dLog = t.Second * t.Duration(nLogPeriod)
+
 	log.Notice("********* START:")
 
 	sAOSync, err := os.Executable()
@@ -95,15 +104,20 @@ func main() {
 			log.Notice("create backup:" + sBackup)
 			errBackup := log.Error(os.Rename(sAOSync, sBackup))
 			log.Notice("updating")
-			if nil != log.Error(os.Rename(sUpdate, sAOSync)) {
-				log.Notice("update failed")
-				if nil == errBackup {
-					log.Notice("trying to restore from backup")
-					log.Error(os.Rename(sBackup, sAOSync))
+			var aBytes []byte
+			if aBytes, err = ioutil.ReadFile(sUpdate); nil == err {
+				if nil == log.Error(ioutil.WriteFile(sAOSync, aBytes, 0777)) {
+					if nil == log.Error(os.Remove(sUpdate)) {
+						log.Notice("updated. exiting")
+						t.Sleep(t.Second)
+						return
+					}
 				}
-			} else {
-				log.Notice("updated. exiting")
-				return
+			}
+			log.Notice("update failed")
+			if nil == errBackup {
+				log.Notice("trying to restore from backup")
+				log.Error(os.Rename(sBackup, sAOSync))
 			}
 		}
 	}
@@ -420,8 +434,6 @@ func copy(pTarget, pSource *os.File, pDenc *Denc) (err error) {
 	}
 	nSizeTotalWrite := oFI.Size()
 	errRead := error(nil)
-	dLog := 5 * t.Minute
-	dLog = 1 * t.Second
 	cWriteQueue := make(chan *Buffer, len(_aBuffers))
 
 	if nil != pDenc {
@@ -499,7 +511,7 @@ func copy(pTarget, pSource *os.File, pDenc *Denc) (err error) {
 			n, err := pSource.Read(_aBuffers[pBuffer.Index])
 			pSpeedRead.Sleep(int64(n))
 			if 0 < n {
-				if dLog < t.Since(tLog) {
+				if _dLog < t.Since(tLog) {
 					tLog = t.Now()
 					log.Printf("READ %s. Along with POP for %s; PUSH for %s", pSpeedRead.String(), pSpeedReadPop.Average().String(), pSpeedReadPush.Average().String())
 					if nil != pDenc {
@@ -573,7 +585,7 @@ func copy(pTarget, pSource *os.File, pDenc *Denc) (err error) {
 					nBytesUsed = 0
 					go debug.FreeOSMemory()
 				}
-				if dLog < t.Since(tLog) {
+				if _dLog < t.Since(tLog) {
 					tLog = t.Now()
 
 					log.Printf("WRITE (%d%%) %s. Along with POP for %s and PUSH for %s", int64(pSpeedWrite.OverallQty*100/nSizeTotalWrite), pSpeedWrite.String(), pSpeedWritePop.Average().String(), pSpeedWritePush.Average().String())
