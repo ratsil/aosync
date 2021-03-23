@@ -91,10 +91,14 @@ func main() {
 
 	}
 	log.Fatal(err)
+
 	sControl := path.Join(_sLocalFolder, ".aosync")
 
 	if 0 < len(sAOSync) {
 		sUpdate := path.Join(sControl, ".update", filepath.Base(sAOSync))
+		if !exists(sUpdate) {
+			sUpdate = path.Join(_sRemoteFolder, ".aosync", _sLocalInstance, ".update", filepath.Base(sAOSync))
+		}
 		if exists(sUpdate) {
 			sBackup := sAOSync + ".bkp"
 			if exists(sBackup) {
@@ -148,6 +152,21 @@ func main() {
 	if exists(sSource) {
 		log.Fatal(errors.New("found " + sSource + ". please remove to continue. now exiting"))
 	}
+	sSource = path.Join(sControl, ".stop!")
+	if exists(sSource) {
+		log.Fatal(errors.New("found " + sSource + ". please remove to continue. now exiting"))
+	}
+	go func(s string) {
+		for {
+			t.Sleep(t.Minute)
+			if exists(s) {
+				log.Fatal(errors.New("found " + s + ". please remove to continue. now exiting"))
+				t.Sleep(t.Second)
+				panic("to be sure")
+			}
+		}
+	}(sSource)
+
 	sSource = path.Join(sControl, ".restart")
 	if exists(sSource) {
 		if err = os.Remove(sSource); nil != err {
@@ -199,8 +218,8 @@ func main() {
 			go func(sSource, sTarget string, b bool) {
 				defer wg.Done()
 				var pDenc *Denc
-				if nil != _pPrivateKey {
-					pDenc = &Denc{Decrypt: b}
+				if nil != _pPublicKey {
+					pDenc = &Denc{Decrypt: nil != _pPrivateKey && b}
 				}
 				if err := cpd(path.Join(sSource, ".copy"), sTarget, path.Join(sSource, ".copy", ".done"), []string{".done"}, pDenc); nil != err {
 					log.Error(err)
@@ -213,8 +232,8 @@ func main() {
 			go func(sSource, sTarget string, b bool) {
 				defer wg.Done()
 				var pDenc *Denc
-				if nil != _pPrivateKey {
-					pDenc = &Denc{Decrypt: b}
+				if nil != _pPublicKey {
+					pDenc = &Denc{Decrypt: nil != _pPrivateKey && b}
 				}
 				if err := cpd(path.Join(sSource, ".move"), sTarget, "", []string{""}, pDenc); nil != err {
 					log.Error(err)
@@ -256,6 +275,7 @@ func main() {
 	}
 	wg.Wait()
 	log.Notice("********* STOP")
+	t.Sleep(t.Second)
 }
 
 func cpd(sSource, sTarget, sDone string, aExcludes []string, pDenc *Denc) (err error) {
@@ -280,7 +300,10 @@ func cpd(sSource, sTarget, sDone string, aExcludes []string, pDenc *Denc) (err e
 				err = nil
 			}
 		}
-		log.Fatal(err)
+		if nil != err {
+			log.Warning(err)
+			return nil
+		}
 
 		for _, sExclude := range aExcludes {
 			if sExclude == sSourceEntry {
@@ -318,8 +341,12 @@ func cpd(sSource, sTarget, sDone string, aExcludes []string, pDenc *Denc) (err e
 		case os.ModeSymlink:
 			log.Notice("symlink ignored:" + sSourceEntry)
 		default:
-			if nil != pDenc {
-				if !pDenc.Decrypt {
+			pDENC := pDenc
+			if nil != pDENC {
+				bAose := s.HasSuffix(s.ToLower(sSourceEntry), ".aose")
+				if (pDENC.Decrypt && !bAose) || (!pDENC.Decrypt && bAose) {
+					pDENC = nil
+				} else if !pDENC.Decrypt {
 					sTargetEntry += ".aose"
 				} else if s.HasSuffix(s.ToLower(sTargetEntry), ".aose") {
 					sTargetEntry = sTargetEntry[:len(sTargetEntry)-5]
@@ -337,12 +364,21 @@ func cpd(sSource, sTarget, sDone string, aExcludes []string, pDenc *Denc) (err e
 					return
 				}
 				defer pTarget.Close()
-
-				log.Notice(" ***** start copy: " + sSourceEntry + " => " + sTargetEntry)
-				pDENC := pDenc
-				if nil != pDenc && pDenc.Decrypt && !s.HasSuffix(s.ToLower(sSourceEntry), ".aose") {
-					pDENC = nil
+				sPrecision := "0f"
+				nSize := float64(oFileInfo.Size())
+				if 1024 < nSize {
+					sPrecision = "2f KB"
+					nSize /= 1024
+					if 1024 < nSize {
+						sPrecision = "2f MB"
+						nSize /= 1024
+						if 1024 < nSize {
+							sPrecision = "2f GB"
+							nSize /= 1024
+						}
+					}
 				}
+				log.Notice(fmt.Sprintf(" ***** start copy (%."+sPrecision+"): %s => %s", nSize, sSourceEntry, sTargetEntry))
 				if err = copy(pTarget, pSource, pDENC); nil != err {
 					return
 				}
@@ -365,78 +401,22 @@ func cpd(sSource, sTarget, sDone string, aExcludes []string, pDenc *Denc) (err e
 	return nil
 }
 
-//Speed .
-type Speed struct {
-	CurrentStart    t.Time
-	OverallStart    t.Time
-	CurrentDuration t.Duration
-	OverallDuration t.Duration
-	CurrentQty      int64
-	OverallQty      int64
-}
-
-//Start .
-func (th *Speed) Start() {
-	th.Restart()
-	th.OverallStart = th.CurrentStart
-	th.OverallDuration = th.CurrentDuration
-	th.OverallQty = th.CurrentQty
-}
-
-//Wake .
-func (th *Speed) Wake() {
-	th.CurrentStart = t.Now()
-}
-
-//Sleep .
-func (th *Speed) Sleep(nQty int64) {
-	d := t.Since(th.CurrentStart)
-	th.OverallDuration += d
-	th.OverallQty += nQty
-	th.CurrentDuration += d
-	th.CurrentQty += nQty
-	th.Wake()
-	return
-}
-
-//Restart .
-func (th *Speed) Restart() {
-	th.Wake()
-	th.CurrentDuration = 0
-	th.CurrentQty = 0
-}
-
-func (th *Speed) speed(n int64, d t.Duration) int64 {
-	nSpeed := int64(d / t.Second)
-	if 0 < nSpeed {
-		nSpeed = (((n * 8) / nSpeed) / 1024 / 1024)
-	}
-	return nSpeed
-}
-
-//Average .
-func (th *Speed) Average() t.Duration {
-	if 2 > th.CurrentQty {
-		return th.CurrentDuration
-	}
-	return t.Duration(th.CurrentDuration.Nanoseconds()/th.CurrentQty) * t.Nanosecond
-}
-
-//String .
-func (th *Speed) String() string {
-	return fmt.Sprintf("current speed at ~%dMbit/s for an average %s while overall at ~%dMbit/s for a total %s", th.speed(th.CurrentQty, th.CurrentDuration), th.Average().String(), th.speed(th.OverallQty, th.OverallDuration), th.OverallDuration.String())
-}
-
 func copy(pTarget, pSource *os.File, pDenc *Denc) (err error) {
+	pSpeedRead := new(Speed)
+	pSpeedRead.Start()
+	pSpeedDenc := new(Speed)
+	pSpeedWrite := new(Speed)
+	pSpeedWrite.Start()
 	oFI, err := pSource.Stat()
 	if nil != err {
 		return err
 	}
+	sFilename := filepath.Base(oFI.Name())
 	nSizeTotalWrite := oFI.Size()
-	errRead := error(nil)
 	cWriteQueue := make(chan *Buffer, len(_aBuffers))
 
 	if nil != pDenc {
+		pSpeedDenc.Start()
 		nSizeHeader := int64(4 + 256 + 16)
 		if !pDenc.Decrypt {
 			nSizeTotalWrite += nSizeHeader
@@ -478,70 +458,74 @@ func copy(pTarget, pSource *os.File, pDenc *Denc) (err error) {
 		}
 	}
 	go func() {
+		defer close(cWriteQueue)
 		tLog := t.Now()
-		pSpeedRead := new(Speed)
-		pSpeedRead.Start()
 		pSpeedReadPop := new(Speed)
 		pSpeedReadPop.Start()
 		pSpeedReadPush := new(Speed)
 		pSpeedReadPush.Start()
-		pSpeedDenc := new(Speed)
-		if nil != pDenc {
-			pSpeedDenc.Start()
-		}
+		nRetries := 0
 		for {
 			var (
-				pBuffer *Buffer
-				c       chan *Buffer
+				pBuffer   *Buffer
+				c         chan *Buffer
+				bContinue bool
+				n         int
 			)
-			pSpeedReadPop.Wake()
-			select {
-			case pBuffer = <-_cBuffersQueue:
-			case <-time.After(5 * time.Minute):
-				errRead = errors.New("timeout on get free buffer before read")
-				log.Error(errRead)
-				return
-			}
-			pSpeedReadPop.Sleep(1)
-			if 1 > pBuffer.Length {
-				continue
+
+			if _dLog < t.Since(tLog) {
+				tLog = t.Now()
+				log.Printf("read (%s) %s. Along with POP for %s; PUSH for %s", sFilename, pSpeedRead.String(), pSpeedReadPop.Average().String(), pSpeedReadPush.Average().String())
+				if nil != pDenc {
+					log.Printf("denc (%s) %s", sFilename, pSpeedDenc.String())
+				}
+				pSpeedRead.Restart()
+				pSpeedReadPop.Restart()
+				pSpeedReadPush.Restart()
+				pSpeedDenc.Restart()
 			}
 
-			pSpeedRead.Wake()
-			n, err := pSource.Read(_aBuffers[pBuffer.Index])
-			pSpeedRead.Sleep(int64(n))
-			if 0 < n {
-				if _dLog < t.Since(tLog) {
-					tLog = t.Now()
-					log.Printf("READ %s. Along with POP for %s; PUSH for %s", pSpeedRead.String(), pSpeedReadPop.Average().String(), pSpeedReadPush.Average().String())
-					if nil != pDenc {
-						log.Printf("DENC %s", pSpeedDenc.String())
-					}
-					pSpeedRead.Restart()
-					pSpeedReadPop.Restart()
-					pSpeedReadPush.Restart()
-					pSpeedDenc.Restart()
-				}
-				if nil != pDenc {
-					pSpeedDenc.Wake()
-					pDenc.Cipher.Do(_aBuffers[pBuffer.Index][:n])
-					pSpeedDenc.Sleep(int64(n))
-				}
-				pBuffer.Length = n
-				c = cWriteQueue
-			} else {
-				c = _cBuffersQueue
-			}
-			pSpeedReadPush.Wake()
+			pSpeedReadPop.Wake()
 			select {
-			case c <- pBuffer:
+			case pBuffer, bContinue = <-_cBuffersQueue:
+				nRetries = 0
+				pSpeedReadPop.Sleep(1)
+				if 1 > pBuffer.Length {
+					continue
+				}
+
+				pSpeedRead.Wake()
+				n, err = pSource.Read(_aBuffers[pBuffer.Index])
+				pSpeedRead.Sleep(int64(n))
+				if 0 < n {
+					if nil != pDenc {
+						pSpeedDenc.Wake()
+						pDenc.Cipher.Do(_aBuffers[pBuffer.Index][:n])
+						pSpeedDenc.Sleep(int64(n))
+					}
+					pBuffer.Length = n
+					c = cWriteQueue
+				} else {
+					c = _cBuffersQueue
+				}
+				pSpeedReadPush.Wake()
+				select {
+				case c <- pBuffer:
+				case <-time.After(5 * time.Minute):
+					log.Fatal(errors.New("timeout on queue full buffer or re-queue unused one after file read for " + sFilename))
+				}
+				pSpeedReadPush.Sleep(1)
 			case <-time.After(5 * time.Minute):
-				errRead = errors.New("timeout on queue full buffer or re-queue unused one after file read")
-				log.Error(errRead)
-				return
+				nRetries++
+				if err := log.Error(fmt.Errorf("timeout on get free buffer before read for %s (retries:%d of 5)", sFilename, nRetries)); 4 < nRetries {
+					panic(err)
+				}
+				continue
+			default:
+				t.Sleep(t.Second)
+				continue
 			}
-			pSpeedReadPush.Sleep(1)
-			if nil != err {
+			if nil != err || !bContinue {
 				if io.EOF == err {
 					err = nil
 				}
@@ -549,26 +533,31 @@ func copy(pTarget, pSource *os.File, pDenc *Denc) (err error) {
 			}
 		}
 		log.Error(err)
-		close(cWriteQueue)
+		//log.Notice("READ (" + sFilename + ") RETURNED!")
 	}()
 	var pBuffer *Buffer
 	tLog := t.Now()
 	nBytesUsed := 0
-	pSpeedWrite := new(Speed)
-	pSpeedWrite.Start()
 	pSpeedWritePop := new(Speed)
 	pSpeedWritePop.Start()
 	pSpeedWritePush := new(Speed)
 	pSpeedWritePush.Start()
+	nRetries := 0
 	for {
-		if nil != errRead {
-			return errRead
+		if _dLog < t.Since(tLog) {
+			tLog = t.Now()
+
+			log.Printf("WRITE (%s:%d%%) %s. Along with POP for %s and PUSH for %s", sFilename, int64(pSpeedWrite.OverallQty*100/nSizeTotalWrite), pSpeedWrite.String(), pSpeedWritePop.Average().String(), pSpeedWritePush.Average().String())
+			pSpeedWrite.Restart()
+			pSpeedWritePop.Restart()
+			pSpeedWritePush.Restart()
 		}
 		bContinue := false
 		n := 0
 		pSpeedWritePop.Wake()
 		select {
 		case pBuffer, bContinue = <-cWriteQueue:
+			nRetries = 0
 			if nil != pBuffer && 0 < pBuffer.Length {
 				pSpeedWritePop.Sleep(1)
 				pSpeedWrite.Wake()
@@ -578,39 +567,36 @@ func copy(pTarget, pSource *os.File, pDenc *Denc) (err error) {
 					return
 				}
 				if n != pBuffer.Length {
-					log.Fatal(errors.New("n != pBuffer.Length"))
+					log.Fatal(errors.New("n != pBuffer.Length for " + sFilename))
 				}
 				nBytesUsed += n
 				if 1024*1024*1024 < nBytesUsed {
 					nBytesUsed = 0
 					go debug.FreeOSMemory()
 				}
-				if _dLog < t.Since(tLog) {
-					tLog = t.Now()
-
-					log.Printf("WRITE (%d%%) %s. Along with POP for %s and PUSH for %s", int64(pSpeedWrite.OverallQty*100/nSizeTotalWrite), pSpeedWrite.String(), pSpeedWritePop.Average().String(), pSpeedWritePush.Average().String())
-					pSpeedWrite.Restart()
-					pSpeedWritePop.Restart()
-					pSpeedWritePush.Restart()
-				}
 				pBuffer.Length = _nBufferSize
 				select {
 				case _cBuffersQueue <- pBuffer:
 				case <-time.After(5 * time.Minute):
-					return errors.New("timeout on re-queue the buffer after file write")
+					log.Fatal(errors.New("timeout on re-queue the buffer after file write for " + sFilename))
 				}
 
 			}
 		case <-time.After(5 * time.Minute):
-			return errors.New("timeout on read full buffer before write")
+			nRetries++
+			if err := log.Error(fmt.Errorf("timeout on read full buffer before write for %s (retries:%d of 5)", sFilename, nRetries)); 4 < nRetries {
+				panic(err)
+			}
+			continue
 		default:
+			t.Sleep(t.Second)
 			continue
 		}
 		if !bContinue {
 			break
 		}
 	}
-	log.Printf(" ***** copy finished with %s", pSpeedWrite.String())
+	log.Printf(" ***** copy (%s) finished with %s", sFilename, pSpeedWrite.String())
 	return os.Chtimes(pTarget.Name(), oFI.ModTime(), oFI.ModTime())
 }
 
