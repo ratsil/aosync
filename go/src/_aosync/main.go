@@ -206,72 +206,73 @@ func main() {
 	sTarget := _sRemoteFolder
 	var wg sync.WaitGroup
 	for n := 0; 2 > n; n++ {
-		if !exists(sSource) {
-			log.Fatal(errors.New("folder '" + sSource + "' does not exists!"))
-		}
-		if exists(path.Join(sSource, ".copy")) {
-			if !exists(path.Join(sSource, ".copy", ".done")) {
-				log.Fatal(errors.New("folder '" + path.Join(sSource, ".copy", ".done") + "' does not exists!"))
-			}
-			bFound = true
-			wg.Add(1)
-			go func(sSource, sTarget string, b bool) {
-				defer wg.Done()
-				var pDenc *Denc
-				if nil != _pPublicKey {
-					pDenc = &Denc{Decrypt: nil != _pPrivateKey && b}
-				}
-				if err := cpd(path.Join(sSource, ".copy"), sTarget, path.Join(sSource, ".copy", ".done"), []string{".done"}, pDenc); nil != err {
-					log.Error(err)
-				}
-			}(sSource, sTarget, 0 < n)
-		}
-		if exists(sSource + "/.move") {
-			bFound = true
-			wg.Add(1)
-			go func(sSource, sTarget string, b bool) {
-				defer wg.Done()
-				var pDenc *Denc
-				if nil != _pPublicKey {
-					pDenc = &Denc{Decrypt: nil != _pPrivateKey && b}
-				}
-				if err := cpd(path.Join(sSource, ".move"), sTarget, "", []string{""}, pDenc); nil != err {
-					log.Error(err)
-				}
-			}(sSource, sTarget, 0 < n)
-		}
-		if nil != _pPublicKey && nil == _pPrivateKey {
-			sEncrypt := path.Join(sSource, "..", ".encrypt")
-			if exists(sEncrypt) {
-				sEncrypted := path.Join(sEncrypt, ".encrypted")
-				if !exists(sEncrypted) {
-					log.Fatal(errors.New("folder '" + sEncrypted + "' does not exists!"))
-				}
-				sDone := path.Join(sEncrypt, ".done")
-				if !exists(sDone) {
-					sDone = ""
+		if exists(sSource) {
+			if exists(path.Join(sSource, ".copy")) {
+				if !exists(path.Join(sSource, ".copy", ".done")) {
+					log.Fatal(errors.New("folder '" + path.Join(sSource, ".copy", ".done") + "' does not exists!"))
 				}
 				bFound = true
 				wg.Add(1)
-				go func(sEncrypt, sEncrypted, sDone string) {
+				go func(sSource, sTarget string, b bool) {
 					defer wg.Done()
-					if 1 > len(sDone) {
-						if err := cpd(sEncrypt, sEncrypted, "", []string{".encrypted"}, new(Denc)); nil != err {
-							log.Error(err)
-						}
-					} else {
-						if err := cpd(sEncrypt, sEncrypted, sDone, []string{".done", ".encrypted"}, new(Denc)); nil != err {
-							log.Error(err)
-						}
+					var pDenc *Denc
+					if nil != _pPublicKey {
+						pDenc = &Denc{Decrypt: nil != _pPrivateKey && b}
 					}
-				}(sEncrypt, sEncrypted, sDone)
+					if err := cpd(path.Join(sSource, ".copy"), sTarget, path.Join(sSource, ".copy", ".done"), []string{".done"}, pDenc); nil != err {
+						log.Error(err)
+					}
+				}(sSource, sTarget, 0 < n)
 			}
+			if exists(sSource + "/.move") {
+				bFound = true
+				wg.Add(1)
+				go func(sSource, sTarget string, b bool) {
+					defer wg.Done()
+					var pDenc *Denc
+					if nil != _pPublicKey {
+						pDenc = &Denc{Decrypt: nil != _pPrivateKey && b}
+					}
+					if err := cpd(path.Join(sSource, ".move"), sTarget, "", []string{""}, pDenc); nil != err {
+						log.Error(err)
+					}
+				}(sSource, sTarget, 0 < n)
+			}
+			if nil != _pPublicKey && nil == _pPrivateKey {
+				sEncrypt := path.Join(sSource, "..", ".encrypt")
+				if exists(sEncrypt) {
+					sEncrypted := path.Join(sEncrypt, ".encrypted")
+					if !exists(sEncrypted) {
+						log.Fatal(errors.New("folder '" + sEncrypted + "' does not exists!"))
+					}
+					sDone := path.Join(sEncrypt, ".done")
+					if !exists(sDone) {
+						sDone = ""
+					}
+					bFound = true
+					wg.Add(1)
+					go func(sEncrypt, sEncrypted, sDone string) {
+						defer wg.Done()
+						if 1 > len(sDone) {
+							if err := cpd(sEncrypt, sEncrypted, "", []string{".encrypted"}, new(Denc)); nil != err {
+								log.Error(err)
+							}
+						} else {
+							if err := cpd(sEncrypt, sEncrypted, sDone, []string{".done", ".encrypted"}, new(Denc)); nil != err {
+								log.Error(err)
+							}
+						}
+					}(sEncrypt, sEncrypted, sDone)
+				}
+			}
+		} else {
+			log.Warning(errors.New("folder '" + sSource + "' does not exists!"))
 		}
 		sSource = path.Join(_sRemoteFolder, ".aosync", _sLocalInstance)
 		sTarget = _sLocalFolder
 	}
 	if !bFound {
-		log.Fatal(errors.New("there are no any .copy or .move subfolders. nothing to do. bye"))
+		log.Fatal(errors.New("there are no any .copy, .move or .encrypt subfolders. nothing to do. bye"))
 	}
 	wg.Wait()
 	log.Notice("********* STOP")
@@ -386,6 +387,8 @@ func cpd(sSource, sTarget, sDone string, aExcludes []string, pDenc *Denc) (err e
 				if !bCopy {
 					if err = os.Remove(sSourceEntry); nil != err {
 						log.Error(err)
+						t.Sleep(t.Second)
+						log.Error(os.Remove(sSourceEntry))
 					}
 				}
 			} else {
@@ -394,6 +397,8 @@ func cpd(sSource, sTarget, sDone string, aExcludes []string, pDenc *Denc) (err e
 			if bCopy {
 				if err = os.Rename(sSourceEntry, sDoneEntry); nil != err {
 					log.Error(err)
+					t.Sleep(t.Second)
+					log.Error(os.Rename(sSourceEntry, sDoneEntry))
 				}
 			}
 		}
@@ -597,6 +602,8 @@ func copy(pTarget, pSource *os.File, pDenc *Denc) (err error) {
 		}
 	}
 	log.Printf(" ***** copy (%s) finished with %s", sFilename, pSpeedWrite.String())
+	log.Error(pTarget.Sync())
+	log.Error(pTarget.Close())
 	return os.Chtimes(pTarget.Name(), oFI.ModTime(), oFI.ModTime())
 }
 
