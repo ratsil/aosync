@@ -8,7 +8,6 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
-	"path"
 	"path/filepath"
 	"runtime/debug"
 	"strconv"
@@ -85,6 +84,14 @@ func main() {
 			a = s.Split(*pRemote, "@")
 			if 2 == len(a) && exists(a[0]) && 0 < len(a[1]) {
 				_sRemoteFolder, _sRemoteInstance = a[0], a[1]
+				for _, p := range []*string{&_sLocalFolder, &_sRemoteFolder} {
+					if !s.HasPrefix(*p, `\\?\`) {
+						if s.HasPrefix(*p, `\\`) {
+							*p = `UNC` + (*p)[1:]
+						}
+						*p = `\\?\` + *p
+					}
+				}
 				err = nil
 			}
 		}
@@ -92,12 +99,12 @@ func main() {
 	}
 	log.Fatal(err)
 
-	sControl := path.Join(_sLocalFolder, ".aosync")
+	sControl := filepath.Join(_sLocalFolder, ".aosync")
 
 	if 0 < len(sAOSync) {
-		sUpdate := path.Join(sControl, ".update", filepath.Base(sAOSync))
+		sUpdate := filepath.Join(sControl, ".update", filepath.Base(sAOSync))
 		if !exists(sUpdate) {
-			sUpdate = path.Join(_sRemoteFolder, ".aosync", _sLocalInstance, ".update", filepath.Base(sAOSync))
+			sUpdate = filepath.Join(_sRemoteFolder, ".aosync", _sLocalInstance, ".update", filepath.Base(sAOSync))
 		}
 		if exists(sUpdate) {
 			sBackup := sAOSync + ".bkp"
@@ -148,11 +155,11 @@ func main() {
 		}
 	}
 
-	sSource := path.Join(sControl, ".stop")
+	sSource := filepath.Join(sControl, ".stop")
 	if exists(sSource) {
 		log.Fatal(errors.New("found " + sSource + ". please remove to continue. now exiting"))
 	}
-	sSource = path.Join(sControl, ".stop!")
+	sSource = filepath.Join(sControl, ".stop!")
 	if exists(sSource) {
 		log.Fatal(errors.New("found " + sSource + ". please remove to continue. now exiting"))
 	}
@@ -167,7 +174,7 @@ func main() {
 		}
 	}(sSource)
 
-	sSource = path.Join(sControl, ".restart")
+	sSource = filepath.Join(sControl, ".restart")
 	if exists(sSource) {
 		if err = os.Remove(sSource); nil != err {
 			log.Fatal(err)
@@ -202,14 +209,14 @@ func main() {
 	// 3. move from nas to tape
 	// 4. copy between nas and tape
 	// 5. encrypt nas/tape
-	sSource = path.Join(sControl, _sRemoteInstance)
+	sSource = filepath.Join(sControl, _sRemoteInstance)
 	sTarget := _sRemoteFolder
 	var wg sync.WaitGroup
 	for n := 0; 2 > n; n++ {
 		if exists(sSource) {
-			if exists(path.Join(sSource, ".copy")) {
-				if !exists(path.Join(sSource, ".copy", ".done")) {
-					log.Fatal(errors.New("folder '" + path.Join(sSource, ".copy", ".done") + "' does not exists!"))
+			if exists(filepath.Join(sSource, ".copy")) {
+				if !exists(filepath.Join(sSource, ".copy", ".done")) {
+					log.Fatal(errors.New("folder '" + filepath.Join(sSource, ".copy", ".done") + "' does not exists!"))
 				}
 				bFound = true
 				wg.Add(1)
@@ -219,7 +226,7 @@ func main() {
 					if nil != _pPublicKey {
 						pDenc = &Denc{Decrypt: nil != _pPrivateKey && b}
 					}
-					if err := cpd(path.Join(sSource, ".copy"), sTarget, path.Join(sSource, ".copy", ".done"), []string{".done"}, pDenc); nil != err {
+					if err := cpd(filepath.Join(sSource, ".copy"), sTarget, filepath.Join(sSource, ".copy", ".done"), []string{".done"}, pDenc); nil != err {
 						log.Error(err)
 					}
 				}(sSource, sTarget, 0 < n)
@@ -233,19 +240,19 @@ func main() {
 					if nil != _pPublicKey {
 						pDenc = &Denc{Decrypt: nil != _pPrivateKey && b}
 					}
-					if err := cpd(path.Join(sSource, ".move"), sTarget, "", []string{""}, pDenc); nil != err {
+					if err := cpd(filepath.Join(sSource, ".move"), sTarget, "", []string{""}, pDenc); nil != err {
 						log.Error(err)
 					}
 				}(sSource, sTarget, 0 < n)
 			}
 			if nil != _pPublicKey && nil == _pPrivateKey {
-				sEncrypt := path.Join(sSource, "..", ".encrypt")
+				sEncrypt := filepath.Join(sSource, "..", ".encrypt")
 				if exists(sEncrypt) {
-					sEncrypted := path.Join(sEncrypt, ".encrypted")
+					sEncrypted := filepath.Join(sEncrypt, ".encrypted")
 					if !exists(sEncrypted) {
 						log.Fatal(errors.New("folder '" + sEncrypted + "' does not exists!"))
 					}
-					sDone := path.Join(sEncrypt, ".done")
+					sDone := filepath.Join(sEncrypt, ".done")
 					if !exists(sDone) {
 						sDone = ""
 					}
@@ -268,7 +275,7 @@ func main() {
 		} else {
 			log.Warning(errors.New("folder '" + sSource + "' does not exists!"))
 		}
-		sSource = path.Join(_sRemoteFolder, ".aosync", _sLocalInstance)
+		sSource = filepath.Join(_sRemoteFolder, ".aosync", _sLocalInstance)
 		sTarget = _sLocalFolder
 	}
 	if !bFound {
@@ -291,10 +298,10 @@ func cpd(sSource, sTarget, sDone string, aExcludes []string, pDenc *Denc) (err e
 	for _, oEntry := range aEntries {
 		sSourceEntry := oEntry.Name()
 
-		sControl := path.Join(_sLocalFolder, ".aosync", ".restart")
+		sControl := filepath.Join(_sLocalFolder, ".aosync", ".restart")
 		err = errors.New("found " + sControl + " before " + sSourceEntry)
 		if !exists(sControl) {
-			sControl = path.Join(_sLocalFolder, ".aosync", ".stop")
+			sControl = filepath.Join(_sLocalFolder, ".aosync", ".stop")
 			if exists(sControl) {
 				err = errors.New("found " + sControl + " before " + sSourceEntry)
 			} else {
