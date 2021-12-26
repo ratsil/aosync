@@ -1,0 +1,7 @@
+{
+	"source": "/path/to/source/file/or/folder", //path to source file or folder
+	"target": "/path/to/target/file/or/folder", //path to target file or folder
+	"type": "copy", //should be copy or move (other types are not implimented yet)
+	"exist": "skip", //should be overwrite, resume or skip (latter is default if omitted)
+    "denc": "auto" //should be encrypt, decrypt or auto. latter will decrypt if source file has ".aose" extension and encrypt in other cases. could be omitted if there is no need for encryption/decryption 
+}
