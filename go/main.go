@@ -143,6 +143,9 @@ func main() {
 	for {
 		tasks()
 		for n := FilesTaskPriorityMax; FilesTaskPrioritySkip < n; n-- {
+			if _bControlStop {
+				return
+			}
 			select {
 			case pTask = <-_aFilesTasks[n]:
 				var pDenc *Denc
@@ -180,6 +183,7 @@ func main() {
 					log.Error(errors.New("FILES TASK ERROR (" + pTask.File + "): " + err.Error()))
 					log.Error(os.MkdirAll(sTasksFailed, 0777))
 					log.Error(os.Rename(pTask.File, filepath.Join(sTasksFailed, sFilename)))
+					err = nil
 				} else {
 					log.Notice("FILES TASK SUCCESS (" + pTask.File + ")")
 					log.Error(os.MkdirAll(sTasksDone, 0777))
@@ -381,6 +385,7 @@ func cpf(sSource, sTarget string, bCopy bool, pDenc *Denc, pExist *FilesTaskExis
 		log.Warning(errors.New("stopped before " + sSource))
 		return nil
 	}
+	tasks()
 	var oSource, oTarget os.FileInfo
 	//log.Debug("cpf.1")
 	if oSource, err = os.Stat(sSource); nil != err {

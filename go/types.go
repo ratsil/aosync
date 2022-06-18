@@ -70,5 +70,5 @@ const (
 //ControlTask .
 type ControlTask struct {
 	Type ControlTaskType `json:"type"`
-	Data *string         `json:"data"`
+	Data *string         `json:"data,omitempty"`
 }
